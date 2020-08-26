@@ -141,11 +141,14 @@ class Handler(server.BaseHTTPRequestHandler):
             self._send_proper_response(post_data['type'], **handler_result_data)
 
 
-def serve_on_port(port):
-    with Database() as database:
-        s = server.ThreadingHTTPServer(("localhost", port), partial(Handler, database, dict()))
+def run_server(config):
+    server_config = config.get_server_config()
+    db_config = config.get_database_config()
+    with Database(**db_config) as database:
+        s = server.ThreadingHTTPServer((server_config['host'], server_config['port']),
+                                       partial(Handler, database, dict()))
         try:
-            logger.info("Starting server on port {}...".format(port))
+            logger.info("Starting server on port {}...".format(server_config['port']))
             s.serve_forever()
         except KeyboardInterrupt:
             s.shutdown()

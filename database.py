@@ -1,4 +1,3 @@
-import logging
 import logging.config
 import pymysql
 
@@ -22,6 +21,12 @@ def exit_on_error(message):
 class Database:
     Error = pymysql.Error
 
+    def __init__(self, host, user, password, db_name):
+        self.host = host
+        self.user = user
+        self.password = password
+        self.db_name = db_name
+
     @staticmethod
     def _create_events_table(cursor):
         cursor.execute(query="CREATE TABLE IF NOT EXISTS events ("
@@ -42,8 +47,8 @@ class Database:
     @exit_on_error("An error occurred while trying to connect to database")
     def _connect_to_db(self):
         logger.info("Connecting to database...")
-        connection = pymysql.connect('localhost', 'root',
-                                     'password', 'calendar', autocommit=True,
+        connection = pymysql.connect(self.host, self.user,
+                                     self.password, self.db_name, autocommit=True,
                                      cursorclass=pymysql.cursors.DictCursor)
         cursor = connection.cursor()
         return connection, cursor

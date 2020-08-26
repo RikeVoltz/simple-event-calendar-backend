@@ -1,1 +1,2 @@
 PyMySQL==0.10.0
+localconfig~=1.1.3
