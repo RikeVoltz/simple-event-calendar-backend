@@ -1,13 +1,17 @@
+import logging
+import logging.config
 import pymysql
+
+logger = logging.getLogger('database')
 
 
 def exit_on_error(message):
     def exit_on_error_decorator(func):
         def wrapper(*args, **kwargs):
             try:
-                func(*args, **kwargs)
+                return func(*args, **kwargs)
             except Database.Error as e:
-                print("{}: error_code={}, exception='{}'".format(message, *e.args))
+                logger.critical("{}: error_code={}, exception='{}'".format(message, *e.args))
                 exit(1)
 
         return wrapper
@@ -24,8 +28,8 @@ class Database:
                              "id int AUTO_INCREMENT PRIMARY KEY NOT NULL,"
                              "owner int,"
                              "name varchar(15) NOT NULL, "
-                             "date varchar(5) NOT NULL, "
-                             "time varchar(4) NOT NULL, "
+                             "date varchar(15) NOT NULL, "
+                             "time varchar(15) NOT NULL, "
                              "duration int NOT NULL)")
 
     @staticmethod
@@ -37,24 +41,32 @@ class Database:
 
     @exit_on_error("An error occurred while trying to connect to database")
     def _connect_to_db(self):
+        logger.info("Connecting to database...")
         connection = pymysql.connect('localhost', 'root',
                                      'password', 'calendar', autocommit=True,
                                      cursorclass=pymysql.cursors.DictCursor)
-        return connection, connection.cursor()
+        cursor = connection.cursor()
+        return connection, cursor
 
     @exit_on_error("An error occurred while trying to create tables")
     def _create_tables(self):
+        logger.info("Creating events and users tables (if needed)...")
         self._create_events_table(self.cursor)
         self._create_users_table(self.cursor)
+        logger.info("User and events tables created")
 
     def __enter__(self):
         self.connection, self.cursor = self._connect_to_db()
+        logger.info("Database connection established")
         self._create_tables()
+        return self
 
-    def __exit__(self):
+    def __exit__(self, *_):
         self.connection.close()
+        logger.info("Database connection closed")
 
     def execute(self, query, *args):
+        logger.info("Executing query: '{}' with args: {}".format(query, args))
         self.cursor.execute(query=query, args=args)
 
     def fetchone(self):
