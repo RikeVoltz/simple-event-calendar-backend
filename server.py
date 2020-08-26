@@ -1,113 +1,163 @@
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
+import uuid
+from functools import partial
+from http import cookies, server
 
 import pymysql
 
-REQUEST_TYPES = ('login', 'register', 'save_event')
+
+def suppress_errors(handler):
+    def wrapper(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except pymysql.Error:
+            return False
+
+    return wrapper
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(server.BaseHTTPRequestHandler):
+    RESPONSE_ERROR_CODES_MAP = {
+        'default': 405,
+        'login': 404,
+        'register': 400,
+        'save_event': 400,
+        'get_events': 400,
+        'get_username': 404,
+        'connect_to_db': 500,
+    }
+
+    @staticmethod
+    def _create_events_table(cursor):
+        cursor.execute(query="CREATE TABLE IF NOT EXISTS events ("
+                             "id int AUTO_INCREMENT PRIMARY KEY NOT NULL,"
+                             "owner int,"
+                             "name varchar(15) NOT NULL, "
+                             "date varchar(5) NOT NULL, "
+                             "time varchar(4) NOT NULL, "
+                             "duration int NOT NULL)")
+
+    @staticmethod
+    def _create_users_table(cursor):
+        cursor.execute(query="CREATE TABLE IF NOT EXISTS users ("
+                             "id int AUTO_INCREMENT PRIMARY KEY NOT NULL,"
+                             "login varchar(15) UNIQUE NOT NULL, "
+                             "password varchar(32) NOT NULL)")
 
     def __init__(self, *args, **kwargs):
-        try:
-            self.connection = pymysql.connect('localhost', 'root',
-                                              'password', 'calendar', autocommit=True)
-            self.cursor = self.connection.cursor()
-        except pymysql.OperationalError:
-            self.send_response(500)
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            raise
-        self.cursor.execute(query="CREATE TABLE IF NOT EXISTS users ("
-                                  "ID int AUTO_INCREMENT PRIMARY KEY NOT NULL,"
-                                  "login varchar(15) UNIQUE NOT NULL, "
-                                  "password varchar(32) NOT NULL)")
-        self.cursor.execute(query="CREATE TABLE IF NOT EXISTS events ("
-                                  "ID int AUTO_INCREMENT PRIMARY KEY NOT NULL,"
-                                  "owner int,"
-                                  "name varchar(15) NOT NULL, "
-                                  "date varchar(5) NOT NULL, "
-                                  "time varchar(4) NOT NULL, "
-                                  "duration int NOT NULL)")
+        self.sessions_dict = dict()
+        self.HANDLERS_MAP = {'login': partial(Handler._check_credentials, self),
+                             'register': partial(Handler._save_credentials, self),
+                             'save_event': partial(Handler._save_event, self),
+                             'get_username': partial(Handler._get_username, self),
+                             'get_events': partial(Handler._get_events, self),
+                             'connect_to_db': partial(Handler._connect_to_db, self)}
+        request_result = self.HANDLERS_MAP['connect_to_db']()
+        if not request_result:
+            self._send_proper_response('connect_to_db', **request_result)
+        self._create_events_table(self.cursor)
+        self._create_users_table(self.cursor)
         super().__init__(*args, **kwargs)
 
     def __del__(self):
         self.connection.close()
 
-    def check_credentials(self, user, password):
-        try:
-            self.cursor.execute(query="SELECT COUNT(*) FROM users WHERE login = %s AND password = %s",
-                                args=[user, password])
-            return self.cursor.fetchone()[0]
-        except pymysql.Error:
-            return False
+    @suppress_errors
+    def _connect_to_db(self):
+        self.connection = pymysql.connect('localhost', 'root',
+                                          'password', 'calendar', autocommit=True,
+                                          cursorclass=pymysql.cursors.DictCursor)
+        self.cursor = self.connection.cursor()
+        return {'is_successful': True}
 
-    def save_credentials(self, user, password):
-        try:
-            self.cursor.execute(query="INSERT INTO users(login, password) VALUES (%s, %s)", args=[user, password])
-            return True
-        except pymysql.Error as e:
-            print(e)
-        return False
-
-    def save_event(self, name, date, time, duration):
-        try:
-            self.cursor.execute(query="INSERT INTO events(name, date, time, duration) VALUES (%s, %s, %s, %s)", args=[name, date, time, duration])
-            return True
-        except pymysql.Error as e:
-            print(e)
-        return False
-
-    def send_proper_response(self, request_result, request_type):
-        if request_result:
-            self.send_response(200)
-            self.send_header('Access-Control-Allow-Origin', '*')
+    @suppress_errors
+    def _get_username(self, user_id, **_):
+        self.cursor.execute(query="SELECT login FROM users WHERE id = %s",
+                            args=[user_id])
+        result = self.cursor.fetchall()
+        if result:
+            return {'is_successful': True, 'handler_result': json.dumps(result)}
         else:
-            if request_type == 'login':
-                self.send_response(404)
-                self.send_header('Access-Control-Allow-Origin', '*')
-            if request_type in ('register', 'save_event'):
-                self.send_response(400)
-                self.send_header('Access-Control-Allow-Origin', '*')
+            return {'is_successful': False}
+
+    def _set_cookie(self, cookie_name, cookie_value):
+        cookie = cookies.SimpleCookie()
+        cookie[cookie_name] = cookie_value
+        self.send_header('Set-Cookie', cookie.output(header=''))
+
+    def _get_cookie(self, cookie_name):
+        if "Cookie" in self.headers:
+            cookie = cookies.SimpleCookie(self.headers["Cookie"])
+            return cookie[cookie_name].value
+        return None
+
+    @suppress_errors
+    def _check_credentials(self, login, password, **_):
+        self.cursor.execute(query="SELECT id FROM users WHERE login = %s AND password = %s",
+                            args=[login, password])
+        result = self.cursor.fetchone()
+        if result:
+            guid = uuid.uuid4()
+            self.sessions_dict[guid] = result['id']
+            self._set_cookie('SESSION_ID', guid)
+            return {'is_successful': True}
+        else:
+            return {'is_successful': False}
+
+    @suppress_errors
+    def _save_credentials(self, user, password, **_):
+        self.cursor.execute(query="INSERT INTO users(login, password) VALUES (%s, %s)", args=[user, password])
+        return {'is_successful': True}
+
+    @suppress_errors
+    def _save_event(self, name, date, time, duration, **_):
+        self.cursor.execute(query="INSERT INTO events(name, date, time, duration) VALUES (%s, %s, %s, %s)",
+                            args=[name, date, time, duration])
+        return {'is_successful': True}
+
+    @suppress_errors
+    def _get_events(self, user_id, **_):
+        self.cursor.execute(query="SELECT * FROM events WHERE owner=%s", args=[user_id])
+        return {'is_successful': True, 'handler_result': json.dumps(self.cursor.fetchall())}
+
+    def _send_proper_response(self, request_type='default', is_successful=True, handler_result=None):
+        if is_successful:
+            self.send_response(200, handler_result)
+        else:
+            self.send_response(self.RESPONSE_ERROR_CODES_MAP[request_type], handler_result)
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
-    @staticmethod
-    def verify_post_data_params(post_data):
+    def _validate_params(self, post_data):
         if post_data['type'] in ('login', 'register'):
-            return 'login' in post_data and 'password' in post_data
+            return all(key in post_data for key in ('login', 'password'))
         elif post_data['type'] == 'save_event':
-            return 'name' in post_data and 'date' in post_data and \
-                   'time' in post_data and 'duration' in post_data
+            return all(key in post_data for key in ('name', 'date', 'time', 'duration'))
+        elif post_data['type'] in ('get_events', 'get_username'):
+            session_id = self._get_cookie('SESSION_ID')
+            if session_id in self.sessions_dict:
+                post_data['user_id'] = self.sessions_dict[session_id]
+            return 'user_id' in post_data
 
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         post_data = json.loads(self.rfile.read(content_length).decode('utf-8'))
-        if 'type' not in post_data or post_data['type'] not in REQUEST_TYPES:
-            self.send_response(403)
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
+        if 'type' not in post_data or \
+                post_data['type'] not in self.HANDLERS_MAP or \
+                not self._validate_params(post_data):
+            self._send_proper_response(is_successful=False)
         else:
-            request_result = False
-            self.verify_post_data_params(post_data)
-            if post_data['type'] == 'login':
-                request_result = self.check_credentials(post_data['login'], post_data['password'])
-            elif post_data['type'] == 'register':
-                request_result = self.save_credentials(post_data['login'], post_data['password'])
-            elif post_data['type'] == 'save_event':
-                request_result = self.save_event(post_data['name'], post_data['date'],
-                                                 post_data['time'], post_data['duration'])
-            self.send_proper_response(request_result, post_data['type'])
-
-
-class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+            handler_result_data = self.HANDLERS_MAP[post_data['type']](**post_data)
+            self._send_proper_response(post_data['type'], **handler_result_data)
 
 
 def serve_on_port(port):
-    server = ThreadingHTTPServer(("localhost", port), Handler)
-    server.serve_forever()
+    s = server.ThreadingHTTPServer(("localhost", port), Handler)
+    try:
+        s.serve_forever()
+    except KeyboardInterrupt:
+        s.shutdown()
 
 
-serve_on_port(5000)
-
+if __name__ == '__main__':
+    serve_on_port(5000)
